@@ -44,6 +44,8 @@ async def health_check() -> dict:
 async def upload_document(
     file: Annotated[UploadFile, File(description="PDF, DOCX, XLSX, or TXT")],
     session: AsyncSession = Depends(get_db_session),
+    frameworks: list[str] | None = Query(default=None, description="Filter rules by framework, e.g. GRI, SASB, ESG"),
+    sector: str | None = Query(default=None, description="Nonprofit/organization sector for sector-specific rules"),
 ) -> UploadResponse:
     filename = file.filename or "unknown"
     content_type = file.content_type or ""
@@ -76,7 +78,7 @@ async def upload_document(
         gap_result = await _llm.assess_compliance_gaps(parsed_doc.raw_text)
         llm_gap_summary = gap_result.get("gap_summary", "")
 
-    findings, score, gri, sasb = _checker.check(parsed_doc)
+    findings, score, gri, sasb = _checker.check(parsed_doc, frameworks=frameworks, sectors=[sector] if sector else None)
     analysis_ms = (time.perf_counter() - t0) * 1000
 
     report = _checker.build_report(parsed_doc, findings, score, gri, sasb, llm_gap_summary, analysis_ms)
