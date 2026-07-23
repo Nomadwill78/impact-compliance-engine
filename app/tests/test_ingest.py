@@ -34,7 +34,7 @@ async def _override_db() -> AsyncGenerator[AsyncSession, None]:
 app.dependency_overrides[get_db_session] = _override_db
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# ── Fixtures ───────────────────────────────────────────────────────────────��─
 @pytest.fixture(scope="session", autouse=True)
 def event_loop():
     loop = asyncio.new_event_loop()
@@ -56,9 +56,15 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def mock_llm():
-    """Mocks the combined analyze_document() call used by the /upload endpoint."""
+    """Mocks the combined analyze_document() call used by the /upload endpoint.
+
+    Function-scoped (not module-scoped) so each test gets a fresh mock with
+    a clean call count. A module-scoped mock would accumulate call counts
+    across every test in the module, making assertions like
+    `mock_llm.assert_called_once()` unreliable depending on test order.
+    """
     with patch("app.api.endpoints._llm.analyze_document", new_callable=AsyncMock) as m:
         m.return_value = {"entities": [], "compliance": {"gap_summary": "Mocked summary.", "gaps": []}}
         yield m
@@ -150,7 +156,7 @@ class TestUpload:
         if not d:
             pytest.skip("python-docx not installed")
         r = client.post("/api/v1/upload",
-            files={"file": ("r.docx", d, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+                         files={"file": ("r.docx", d, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
         assert r.status_code == 200
         assert r.json()["file_type"] == "docx"
 
@@ -220,11 +226,4 @@ class TestRetrieval:
 
 
 class TestAnalytics:
-    def test_summary(self, client: TestClient, mock_llm) -> None:
-        client.post("/api/v1/upload", files={"file": ("s.pdf", _pdf("Summary."), "application/pdf")})
-        r = client.get("/api/v1/analytics/summary")
-        assert r.status_code == 200
-        d = r.json()
-        assert d["total_documents"] >= 1
-        assert isinstance(d["average_score"], float)
-        assert d["total_findings"] >= 0
+    def test_summary(self, client: TestClient, mock_
