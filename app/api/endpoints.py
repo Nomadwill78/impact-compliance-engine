@@ -7,10 +7,11 @@ import time
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_api_key
+from app.core.config import settings
 from app.core.database import get_db_session
 from app.models.schemas import AnalyticsSummary, ComplianceReport, ReportListItem, UploadResponse
 from app.services import db_service
@@ -39,9 +40,38 @@ async def health_check() -> dict:
     return {"status": "ok", "rules_loaded": len(_rule_engine.rules), "supported_formats": list(_ALLOWED_EXT)}
 
 
+async def _read_upload_within_limit(file: UploadFile, max_bytes: int) -> bytes:
+    """Read an UploadFile in chunks, aborting early if it exceeds max_bytes.
+
+    Reading in bounded chunks (rather than a single `await file.read()`)
+    ensures we never buffer more than `max_bytes + 1 chunk` in memory,
+    protecting against oversized or maliciously large uploads regardless
+    of what the client claims via Content-Length.
+    """
+    chunk_size = 1024 * 1024  # 1 MB
+    total = 0
+    chunks: list[bytes] = []
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={
+                    "error": "file_too_large",
+                    "message": f"Upload exceeds the maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                },
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/upload", response_model=UploadResponse, tags=["compliance"],
              summary="Upload a document for compliance analysis")
 async def upload_document(
+    request: Request,
     file: Annotated[UploadFile, File(description="PDF, DOCX, XLSX, or TXT")],
     session: AsyncSession = Depends(get_db_session),
     frameworks: list[str] | None = Query(default=None, description="Filter rules by framework, e.g. GRI, SASB, ESG"),
@@ -50,14 +80,29 @@ async def upload_document(
     filename = file.filename or "unknown"
     content_type = file.content_type or ""
     ext = Path(filename).suffix.lower()
-
     if ext not in _ALLOWED_EXT and content_type not in _ALLOWED_MIME:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail={"error": "unsupported_file_type",
                                      "message": f"Unsupported '{ext}'. Accepted: {sorted(_ALLOWED_EXT)}",
                                      "filename": filename})
 
-    file_bytes = await file.read()
+    # Fast-path rejection using the declared Content-Length header, before
+    # reading any bytes off the wire.
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > settings.max_upload_size_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "error": "file_too_large",
+                        "message": f"Upload exceeds the maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    },
+                )
+        except ValueError:
+            pass  # Malformed header — fall through to the chunked-read guard below.
+
+    file_bytes = await _read_upload_within_limit(file, settings.max_upload_size_bytes)
     if not file_bytes:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail={"error": "empty_file", "message": "Uploaded file is empty."})
@@ -69,10 +114,13 @@ async def upload_document(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail={"error": "parse_failure", "message": str(exc)}) from exc
 
-    # Gemini NLP enrichment — single combined call for entities + compliance gaps
+    # Gemini NLP enrichment — single combined call for entities + compliance gaps.
+    # Text is capped before being sent to the LLM to bound latency/cost on very
+    # large documents; the full text is still persisted/used for rule checks.
     llm_gap_summary = ""
     if parsed_doc.raw_text.strip():
-        analysis = await _llm.analyze_document(parsed_doc.raw_text)
+        llm_input_text = parsed_doc.raw_text[: settings.MAX_LLM_TEXT_CHARS]
+        analysis = await _llm.analyze_document(llm_input_text)
         parsed_doc.entities = analysis.get("entities", [])
         gap_result = analysis.get("compliance") or {}
         llm_gap_summary = gap_result.get("gap_summary", "")
