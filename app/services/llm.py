@@ -9,7 +9,6 @@ extraction and compliance gap assessment in a single LLM call to reduce
 cost and latency versus calling extract_entities() and
 assess_compliance_gaps() separately.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -34,9 +33,9 @@ def _get_model():
         return None
     try:
         import google.generativeai as genai
-
         genai.configure(api_key=api_key)
-        _model = genai.GenerativeModel("gemini-1.5-flash")
+        model_name = getattr(settings, "GEMINI_MODEL", None) or "gemini-1.5-flash"
+        _model = genai.GenerativeModel(model_name)
     except Exception:
         logger.exception("Failed to initialize Gemini model")
         _model = None
@@ -54,8 +53,8 @@ async def _call_with_retry(prompt: str, retries: int = 2) -> str:
             text = text.strip()
             if text.startswith("```"):
                 text = text.strip("`")
-                if text.lower().startswith("json"):
-                    text = text[4:]
+            if text.lower().startswith("json"):
+                text = text[4:]
             return text.strip()
         except Exception:
             logger.exception("Gemini call failed (attempt %s)", attempt)
@@ -68,20 +67,24 @@ _ENTITY_PROMPT = """\
 You are an ESG compliance analyst. Extract key entities (organizations, metrics,
 standards, dates, locations) from the document below.
 Return JSON: [{{"text": "...", "label": "...", "context": "..."}}]
+
 DOCUMENT TEXT (first 8,000 chars):
 \"\"\"
 {text}
 \"\"\"
+
 Return ONLY valid JSON.
 """
 
 _GAP_PROMPT = """\
 You are an ESG compliance analyst. Analyse the document for GRI/SASB compliance gaps.
 Return JSON: {{"gap_summary": "...", "gaps": [{{"area": "...", "severity": "critical|high|medium|low", "description": "...", "gri_reference": "...", "sasb_reference": "...", "remediation": "..."}}]}}
+
 DOCUMENT TEXT (first 10,000 chars):
 \"\"\"
 {text}
 \"\"\"
+
 Return ONLY valid JSON.
 """
 
@@ -105,6 +108,7 @@ DOCUMENT TEXT (first 10,000 chars):
 \"\"\"
 {text}
 \"\"\"
+
 Return ONLY valid JSON, no markdown fences, no commentary.
 """
 
@@ -166,7 +170,6 @@ async def analyze_document(text: str, max_chars: int = 10000) -> dict[str, Any]:
             return {"entities": entities, "compliance": compliance}
         except (json.JSONDecodeError, TypeError, AttributeError):
             logger.warning("Combined analysis JSON parse failed, falling back to two calls")
-
     entities = await extract_entities(text)
     compliance = await assess_compliance_gaps(text)
     return {"entities": entities, "compliance": compliance}
