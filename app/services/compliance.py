@@ -23,6 +23,8 @@ class ComplianceRule:
     category: str
     severity: Severity
     check: Callable[[ParsedDocument], list[AnomalyFinding]] = field(repr=False)
+    frameworks: list[str] = field(default_factory=list)
+    sectors: list[str] = field(default_factory=list)
 
 
 def _has(text: str, keywords: list[str]) -> bool:
@@ -285,6 +287,17 @@ class RuleEngine:
             ComplianceRule("DIS-002",     "FLS",         "Disclosure",         Severity.LOW,      _dis_fls),
         ]
 
+    def filter_rules(self, frameworks: list[str] | None = None, sectors: list[str] | None = None) -> list[ComplianceRule]:
+        """Return rules matching the given frameworks/sectors. Empty/None = run all rules (default behavior)."""
+        rules = self.rules
+        if frameworks:
+            fw_lower = {f.lower() for f in frameworks}
+            rules = [r for r in rules if not r.frameworks or {f.lower() for f in r.frameworks} & fw_lower or any(fw in r.category.lower() for fw in fw_lower)]
+        if sectors:
+            sec_lower = {s.lower() for s in sectors}
+            rules = [r for r in rules if not r.sectors or {s.lower() for s in r.sectors} & sec_lower]
+        return rules
+
 
 _PENALTIES = {Severity.CRITICAL: 25.0, Severity.HIGH: 10.0, Severity.MEDIUM: 5.0, Severity.LOW: 2.0, Severity.INFO: 0.0}
 _CAT_IDS = {
@@ -298,9 +311,10 @@ class ComplianceChecker:
     def __init__(self, rule_engine: RuleEngine) -> None:
         self._engine = rule_engine
 
-    def check(self, doc: ParsedDocument) -> tuple[list[AnomalyFinding], ComplianceScore, list[GRIDisclosure], list[SASBMetric]]:
+        def check(self, doc: ParsedDocument, frameworks: list[str] | None = None, sectors: list[str] | None = None) -> tuple[list[AnomalyFinding], ComplianceScore, list[GRIDisclosure], list[SASBMetric]]:
         findings: list[AnomalyFinding] = []
-        for rule in self._engine.rules:
+        active_rules = self._engine.filter_rules(frameworks, sectors)
+        for rule in active_rules:
             try:
                 findings.extend(rule.check(doc))
             except Exception as exc:  # noqa: BLE001

@@ -3,6 +3,11 @@ Google Gemini NLP Service
 ==========================
 Entity extraction, GRI/SASB gap assessment, section summarisation.
 Degrades gracefully when GEMINI_API_KEY is not set.
+
+Includes a combined analysis path (analyze_document) that performs entity
+extraction and compliance gap assessment in a single LLM call to reduce
+cost and latency versus calling extract_entities() and
+assess_compliance_gaps() separately.
 """
 
 from __future__ import annotations
@@ -24,63 +29,83 @@ def _get_model():
     global _model
     if _model is not None:
         return _model
-    if not settings.GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set — Gemini NLP disabled.")
+    api_key = getattr(settings, "GEMINI_API_KEY", None)
+    if not api_key:
         return None
     try:
-        import google.generativeai as genai  # noqa: PLC0415
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        _model = genai.GenerativeModel(settings.GEMINI_MODEL)
-        logger.info("Gemini model '%s' initialised.", settings.GEMINI_MODEL)
-    except ImportError:
-        logger.warning("google-generativeai not installed.")
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        _model = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception:
+        logger.exception("Failed to initialize Gemini model")
+        _model = None
     return _model
 
 
-async def _call_with_retry(prompt: str, max_retries: int = 3) -> str | None:
+async def _call_with_retry(prompt: str, retries: int = 2) -> str:
     model = _get_model()
     if model is None:
-        return None
-    import google.generativeai as genai  # noqa: PLC0415
-    for attempt in range(max_retries):
+        return ""
+    for attempt in range(retries + 1):
         try:
-            response = await asyncio.to_thread(
-                model.generate_content, prompt,
-                generation_config=genai.GenerationConfig(response_mime_type="application/json", temperature=0.1),
-            )
-            return response.text
-        except Exception as exc:  # noqa: BLE001
-            wait = 2 ** attempt
-            logger.warning("Gemini attempt %d/%d failed: %s — retrying in %ds", attempt + 1, max_retries, exc, wait)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(wait)
-    return None
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            text = getattr(response, "text", "") or ""
+            text = text.strip()
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:]
+            return text.strip()
+        except Exception:
+            logger.exception("Gemini call failed (attempt %s)", attempt)
+            if attempt < retries:
+                await asyncio.sleep(1.5 * (attempt + 1))
+    return ""
 
 
 _ENTITY_PROMPT = """\
-Extract named entities from the text. Return a JSON array of objects with fields:
-- "text": entity surface form
-- "label": one of ORG, MONEY, DATE, PERCENT, GPE, METRIC, QUANTITY
-- "context": 10-20 word surrounding snippet
-
-TEXT:
+You are an ESG compliance analyst. Extract key entities (organizations, metrics,
+standards, dates, locations) from the document below.
+Return JSON: [{{"text": "...", "label": "...", "context": "..."}}]
+DOCUMENT TEXT (first 8,000 chars):
 \"\"\"
 {text}
 \"\"\"
-
-Return ONLY valid JSON array.
+Return ONLY valid JSON.
 """
 
 _GAP_PROMPT = """\
 You are an ESG compliance analyst. Analyse the document for GRI/SASB compliance gaps.
 Return JSON: {{"gap_summary": "...", "gaps": [{{"area": "...", "severity": "critical|high|medium|low", "description": "...", "gri_reference": "...", "sasb_reference": "...", "remediation": "..."}}]}}
+DOCUMENT TEXT (first 10,000 chars):
+\"\"\"
+{text}
+\"\"\"
+Return ONLY valid JSON.
+"""
+
+_COMBINED_PROMPT = """\
+You are an ESG compliance analyst. Given the document text below, perform TWO tasks
+and return a SINGLE JSON object with both results:
+
+1. entities: Extract key entities (organizations, metrics, standards, dates, locations).
+2. compliance: Analyse the document for GRI/SASB compliance gaps.
+
+Return JSON in exactly this shape:
+{{
+  "entities": [{{"text": "...", "label": "...", "context": "..."}}],
+  "compliance": {{
+    "gap_summary": "...",
+    "gaps": [{{"area": "...", "severity": "critical|high|medium|low", "description": "...", "gri_reference": "...", "sasb_reference": "...", "remediation": "..."}}]
+  }}
+}}
 
 DOCUMENT TEXT (first 10,000 chars):
 \"\"\"
 {text}
 \"\"\"
-
-Return ONLY valid JSON.
+Return ONLY valid JSON, no markdown fences, no commentary.
 """
 
 
@@ -90,9 +115,15 @@ async def extract_entities(text: str, max_chars: int = 8000) -> list[ExtractedEn
         return []
     try:
         data = json.loads(raw)
-        return [ExtractedEntity(text=item.get("text", ""), label=item.get("label", "UNKNOWN"),
-                                context=item.get("context", ""))
-                for item in data if isinstance(item, dict) and item.get("text")]
+        return [
+            ExtractedEntity(
+                text=item.get("text", ""),
+                label=item.get("label", "UNKNOWN"),
+                context=item.get("context", ""),
+            )
+            for item in data
+            if isinstance(item, dict) and item.get("text")
+        ]
     except (json.JSONDecodeError, TypeError):
         return []
 
@@ -107,9 +138,46 @@ async def assess_compliance_gaps(text: str) -> dict[str, Any]:
         return {"gap_summary": "", "gaps": []}
 
 
+async def analyze_document(text: str, max_chars: int = 10000) -> dict[str, Any]:
+    """Combined entity extraction + compliance gap assessment in a single LLM call.
+
+    Returns a dict with keys:
+      - entities: list[ExtractedEntity]
+      - compliance: dict[str, Any] (gap_summary, gaps)
+
+    Falls back to two separate calls if the combined call fails to parse,
+    to preserve existing behaviour and reliability.
+    """
+    raw = await _call_with_retry(_COMBINED_PROMPT.format(text=text[:max_chars]))
+    if raw:
+        try:
+            data = json.loads(raw)
+            entities_raw = data.get("entities", []) or []
+            entities = [
+                ExtractedEntity(
+                    text=item.get("text", ""),
+                    label=item.get("label", "UNKNOWN"),
+                    context=item.get("context", ""),
+                )
+                for item in entities_raw
+                if isinstance(item, dict) and item.get("text")
+            ]
+            compliance = data.get("compliance") or {"gap_summary": "", "gaps": []}
+            return {"entities": entities, "compliance": compliance}
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            logger.warning("Combined analysis JSON parse failed, falling back to two calls")
+
+    entities = await extract_entities(text)
+    compliance = await assess_compliance_gaps(text)
+    return {"entities": entities, "compliance": compliance}
+
+
 class GeminiNLPService:
     async def extract_entities(self, text: str) -> list[ExtractedEntity]:
         return await extract_entities(text)
 
     async def assess_compliance_gaps(self, text: str) -> dict[str, Any]:
         return await assess_compliance_gaps(text)
+
+    async def analyze_document(self, text: str) -> dict[str, Any]:
+        return await analyze_document(text)
