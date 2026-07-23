@@ -1,8 +1,7 @@
 """
 Backend Unit Tests — runs on in-memory SQLite, Gemini API fully mocked.
-Run with:  python -m pytest app\\tests -v --asyncio-mode=auto
+Run with: python -m pytest app\tests -v --asyncio-mode=auto
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +17,6 @@ from app.core.database import Base, get_db_session
 from app.main import app
 
 # ── Test DB ──────────────────────────────────────────────────────────────────
-
 _engine = create_async_engine("sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False})
 _TestSession = async_sessionmaker(bind=_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
@@ -32,11 +30,11 @@ async def _override_db() -> AsyncGenerator[AsyncSession, None]:
             await session.rollback()
             raise
 
+
 app.dependency_overrides[get_db_session] = _override_db
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
-
 @pytest.fixture(scope="session", autouse=True)
 def event_loop():
     loop = asyncio.new_event_loop()
@@ -60,17 +58,13 @@ def client() -> TestClient:
 
 @pytest.fixture(scope="module")
 def mock_llm():
-    with (
-        patch("app.api.endpoints._llm.extract_entities", new_callable=AsyncMock) as m1,
-        patch("app.api.endpoints._llm.assess_compliance_gaps", new_callable=AsyncMock) as m2,
-    ):
-        m1.return_value = []
-        m2.return_value = {"gap_summary": "Mocked summary.", "gaps": []}
-        yield m1, m2
+    """Mocks the combined analyze_document() call used by the /upload endpoint."""
+    with patch("app.api.endpoints._llm.analyze_document", new_callable=AsyncMock) as m:
+        m.return_value = {"entities": [], "compliance": {"gap_summary": "Mocked summary.", "gaps": []}}
+        yield m
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
 def _pdf(text: str = "Hello World") -> bytes:
     body = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET"
     stream_bytes = body.encode("latin-1")
@@ -85,8 +79,6 @@ def _pdf(text: str = "Hello World") -> bytes:
         b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \n0000000208 00000 n \n0000000275 00000 n \n"
         b"trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n356\n%%EOF"
     )
-
-
 
 
 def _txt(text: str) -> bytes:
@@ -126,7 +118,6 @@ def _anomalous_pdf() -> bytes:
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-
 class TestHealth:
     def test_root(self, client: TestClient) -> None:
         r = client.get("/health")
@@ -172,6 +163,21 @@ class TestUpload:
         r = client.post("/api/v1/upload", files={"file": ("e.pdf", b"", "application/pdf")})
         assert r.status_code == 422
         assert r.json()["detail"]["error"] == "empty_file"
+
+    def test_uses_combined_analyze_document(self, client: TestClient, mock_llm) -> None:
+        """Verifies /upload calls the single combined analyze_document() path,
+        not the legacy two-call extract_entities()/assess_compliance_gaps() path."""
+        r = client.post("/api/v1/upload", files={"file": ("c.pdf", _pdf("Combined call check."), "application/pdf")})
+        assert r.status_code == 200
+        mock_llm.assert_called_once()
+
+    def test_frameworks_and_sector_params_accepted(self, client: TestClient, mock_llm) -> None:
+        r = client.post(
+            "/api/v1/upload?frameworks=GRI&frameworks=SASB&sector=education",
+            files={"file": ("fs.pdf", _pdf("Framework and sector filter test."), "application/pdf")},
+        )
+        assert r.status_code == 200
+        assert "report_id" in r.json()
 
 
 class TestCompliance:
