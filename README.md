@@ -211,3 +211,7 @@ Then register it in `RuleEngine._load_rules()`.
 - **GitHub**: [Nomadwill78](https://github.com/Nomadwill78)
 - **Email**: nomadconsulting7@gmail.com
 
+
+## Authentication
+
+Set `API_KEYS` before starting the API and send one configured key in `X-API-Key` for `/api/v1` requests. Missing configuration refuses startup and returns 503 if lifespan is bypassed. For isolated local development only, both `DEBUG=true` and `ALLOW_UNAUTHENTICATED_LOCAL_DEV=true` explicitly allow unauthenticated access; never enable these on a deployed service.

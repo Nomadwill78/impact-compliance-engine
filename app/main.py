@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncGenerator:
+    if not settings.api_keys_list and not (settings.DEBUG and settings.ALLOW_UNAUTHENTICATED_LOCAL_DEV):
+        raise RuntimeError("API_KEYS must be configured before the service can start.")
     if settings.USE_ALEMBIC_MIGRATIONS:
         logger.info("[startup] USE_ALEMBIC_MIGRATIONS=True — skipping auto create_all. Run `alembic upgrade head`.")
     else:

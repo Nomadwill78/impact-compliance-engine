@@ -3,9 +3,8 @@ API Key Authentication
 =======================
 Simple header-based API key auth for the /api/v1 routes.
 
-Enabled automatically when settings.API_KEYS is non-empty. When no keys are
-configured (e.g. local development), requests are allowed through but a
-warning is emitted so this is never silently insecure in production.
+Required by default. An explicit local-development bypass requires DEBUG
+and ALLOW_UNAUTHENTICATED_LOCAL_DEV together.
 """
 from __future__ import annotations
 
@@ -24,16 +23,15 @@ async def require_api_key(x_api_key: str | None = Header(default=None, alias=_AP
     """FastAPI dependency that validates the X-API-Key header.
 
     Raises 401 if API_KEYS is configured and the provided key is missing or invalid.
-    If no API_KEYS are configured, the check is skipped (dev mode) with a warning.
+    Missing configuration returns 503 unless the explicit local bypass is enabled.
     """
     valid_keys = settings.api_keys_list
 
     if not valid_keys:
-        logger.warning(
-            "API_KEYS is not configured — /api/v1 routes are UNAUTHENTICATED. "
-            "Set API_KEYS in the environment to enable auth."
-        )
-        return
+        if settings.DEBUG and settings.ALLOW_UNAUTHENTICATED_LOCAL_DEV:
+            logger.warning("Explicit unauthenticated local development mode is enabled.")
+            return
+        raise HTTPException(status_code=503, detail="API authentication is not configured.")
 
     if not x_api_key or x_api_key not in valid_keys:
         raise HTTPException(
