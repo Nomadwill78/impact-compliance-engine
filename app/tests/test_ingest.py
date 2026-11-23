@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.database import Base, get_db_session
 from app.main import app
+from app.core.config import settings
 
 # ── Test DB ──────────────────────────────────────────────────────────────────
 _engine = create_async_engine("sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False})
@@ -52,8 +53,9 @@ async def setup_db():
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
-    return TestClient(app)
+def client():
+    with patch.object(settings, "API_KEYS", "unit-test-only-key"):
+        yield TestClient(app, headers={"X-API-Key": "unit-test-only-key"})
 
 
 @pytest.fixture
@@ -226,4 +228,9 @@ class TestRetrieval:
 
 
 class TestAnalytics:
-    def test_summary(self, client: TestClient, mock_
+    def test_summary(self, client: TestClient, mock_llm) -> None:
+        uploaded = client.post("/api/v1/upload", files={"file": ("summary.txt", _txt("Revenue: 100000"), "text/plain")})
+        assert uploaded.status_code == 200
+        response = client.get("/api/v1/analytics/summary")
+        assert response.status_code == 200
+        assert response.json()["total_documents"] > 0

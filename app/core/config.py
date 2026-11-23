@@ -17,10 +17,12 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-1.5-flash"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/compliance_db"
     DEBUG: bool = False
+    # Authentication is required unless local development is explicitly enabled.
+    ALLOW_UNAUTHENTICATED_LOCAL_DEV: bool = False
 
     # --- Security / API auth ---
     # Comma-separated list of valid API keys accepted via the X-API-Key header.
-    # If empty, auth is disabled (useful for local dev) but a startup warning is logged.
+    # Empty keys fail closed; local bypass also requires DEBUG=true.
     API_KEYS: str = ""
     # Comma-separated list of allowed CORS origins. Defaults to no origins (deny-all)
     # in production; set explicitly via environment for the frontend's real origin(s).

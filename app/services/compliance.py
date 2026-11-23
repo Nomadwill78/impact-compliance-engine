@@ -311,7 +311,7 @@ class ComplianceChecker:
     def __init__(self, rule_engine: RuleEngine) -> None:
         self._engine = rule_engine
 
-        def check(self, doc: ParsedDocument, frameworks: list[str] | None = None, sectors: list[str] | None = None) -> tuple[list[AnomalyFinding], ComplianceScore, list[GRIDisclosure], list[SASBMetric]]:
+    def check(self, doc: ParsedDocument, frameworks: list[str] | None = None, sectors: list[str] | None = None) -> tuple[list[AnomalyFinding], ComplianceScore, list[GRIDisclosure], list[SASBMetric]]:
         findings: list[AnomalyFinding] = []
         active_rules = self._engine.filter_rules(frameworks, sectors)
         for rule in active_rules:
